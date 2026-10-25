@@ -15,11 +15,6 @@
 
 #define DEFAULT_PATH "/apps/system:/apps/leopard"
 
-/* ---- leopard-ime 文件 IPC 客户端（仅显式 ime 查询命令用） ---- */
-#define IME_REQ      "/system/leopard/ime/request"
-#define IME_RESP     "/system/leopard/ime/response"
-#define IME_RESP_CAP 256
-
 static char g_home[PATH_CAP];
 static char g_workdir[PATH_CAP];
 static char g_path[CONFIG_CAP];
@@ -160,76 +155,6 @@ static void do_cd(char *arg)
     g_workdir[sizeof(g_workdir) - 1] = '\0';
 }
 
-/* 手写小整数解析，避免依赖 atoi */
-static int parse_index(const char *s)
-{
-    int v = 0;
-    for (const char *p = s; *p >= '0' && *p <= '9'; p++)
-        v = v * 10 + (*p - '0');
-    return v;
-}
-
-/* 发送一条请求，等 daemon ack（清空 request），读回响应 */
-static void ime_request(const char *cmd, char *resp, size_t cap)
-{
-    xapi_WriteFile((WSTR)IME_REQ, (char *)cmd, strlen(cmd) + 1, 0);
-    for (int i = 0; i < 300; i++) {              /* 最多 ~3s */
-        char probe[8] = {0};
-        int64_t n = (int64_t)xapi_ReadFile((WSTR)IME_REQ, probe, sizeof(probe) - 1, 0);
-        if (n <= 0 || probe[0] == '\0')
-            break;
-        xapi_Sleep(10);
-    }
-    int64_t rn = (int64_t)xapi_ReadFile((WSTR)IME_RESP, resp, cap - 1, 0);
-    resp[rn > 0 ? rn : 0] = '\0';
-}
-
-/* ime <拼音> [序号]：显式查询候选 / 选中第 n 个候选 */
-static void do_ime(char *args[], int n)
-{
-    if (n < 2) {
-        xapi_Printf("usage: ime <pinyin> [index]\n");
-        return;
-    }
-
-    char cmd[LINE_CAP];
-    snprintf(cmd, sizeof(cmd), "COMPOSE %s", args[1]);
-
-    char resp[IME_RESP_CAP] = {0};
-    ime_request(cmd, resp, sizeof(resp));
-
-    if (strncmp(resp, "OK", 2) != 0) {
-        xapi_Printf("ime: no candidates for %s\n", args[1]);
-        return;
-    }
-
-    const char *cand[MAX_ARGS];
-    int nc = 0;
-    char *tok = strtok(resp + 2, " \t");
-    while (tok != NULL && nc < MAX_ARGS - 1) {
-        cand[nc++] = tok;
-        tok = strtok(NULL, " \t");
-    }
-
-    if (nc == 0) {
-        xapi_Printf("ime: no candidates for %s\n", args[1]);
-        return;
-    }
-
-    if (n < 3) {
-        for (int i = 0; i < nc; i++)
-            xapi_Printf("%d.%s%s", i + 1, cand[i], (i + 1 < nc) ? "  " : "\n");
-        return;
-    }
-
-    int idx = parse_index(args[2]);
-    if (idx < 1 || idx > nc) {
-        xapi_Printf("ime: index %d out of range 1..%d\n", idx, nc);
-        return;
-    }
-    xapi_Printf("%s\n", cand[idx - 1]);
-}
-
 /* 读一整行（阻塞）。XAPI_INPUT 在内核里找不到 is_shell 终端时会兜底直读键盘，
  * 自带回显 + 退格 + 换行处理，因此不依赖逐字节 Getch / 终端标记。 */
 static void read_line(char *buf, size_t cap)
@@ -291,10 +216,6 @@ int main(int argc, char *argv[], char *envp[])
         }
         if (strcmp(args[0], "cd") == 0) {
             do_cd(args[1]);
-            continue;
-        }
-        if (strcmp(args[0], "ime") == 0) {
-            do_ime(args, n);
             continue;
         }
 
