@@ -60,7 +60,7 @@ def emit_package(L, pkg, target):
     cmd = "rm -rf .pkg"
     for src, dst in files:
         cmd += f" && mkdir -p .pkg/$$(dirname {dst}) && cp {esc(src)} .pkg/{dst}"
-    cmd += f" && cd out && xbps-create {args} ../.pkg"
+    cmd += f" && cd out && xbps-create --compression gzip {args} ../.pkg"
 
     L += ["rule package", f"  command = {cmd}", ""]
     L += [f"build {esc(out)}: package {' '.join(esc(s) for s, _ in files)}"]
