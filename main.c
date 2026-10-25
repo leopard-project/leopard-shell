@@ -1,6 +1,9 @@
 /*
  * lpsh — Leopard Shell
- * 全新用户态 shell：workdir 概念 + 读取 path 变量解析命令（替代硬编码 /apps）。
+ * 用户态 shell：workdir 概念 + 读取 path 变量解析命令（替代硬编码 /apps）。
+ *
+ * 输入采用整行读取（XAPI_INPUT）。不再做逐字节行编辑器 / 内联 IME：
+ * 输入法（leopard-ime）作为独立输入中间层存在，lpsh 只消费整行文本。
  */
 #include "xtuiapi.h"
 
@@ -12,7 +15,7 @@
 
 #define DEFAULT_PATH "/apps/system:/apps/leopard"
 
-/* ---- leopard-ime 文件 IPC 客户端（方案 A：用户态输入法守护进程） ---- */
+/* ---- leopard-ime 文件 IPC 客户端（仅显式 ime 查询命令用） ---- */
 #define IME_REQ      "/system/leopard/ime/request"
 #define IME_RESP     "/system/leopard/ime/response"
 #define IME_RESP_CAP 256
@@ -40,22 +43,22 @@ static int config_get(const char *username, const char *key, char *out, size_t o
         if (eol != NULL)
             *eol = '\0';
 
-        if (strncmp(line, key, key_len) == 0 && line[key_len] == '=') {
-            char *val = line + key_len + 1;
-            size_t len = strlen(val);
-            while (len > 0 && (val[len - 1] == '\r' || val[len - 1] == ' ' || val[len - 1] == '\t'))
-                val[--len] = '\0';
-            if (len > 0 && len < out_cap) {
-                memcpy(out, val, len);
-                out[len] = '\0';
-                return 0;
-            }
-            return -1;
+        if (strncmp(line, key, key_len) != 0 || line[key_len] != '=') {
+            if (eol == NULL)
+                break;
+            line = eol + 1;
+            continue;
         }
 
-        if (eol == NULL)
-            break;
-        line = eol + 1;
+        char *val = line + key_len + 1;
+        size_t len = strlen(val);
+        while (len > 0 && (val[len - 1] == '\r' || val[len - 1] == ' ' || val[len - 1] == '\t'))
+            val[--len] = '\0';
+        if (len == 0 || len >= out_cap)
+            return -1;
+        memcpy(out, val, len);
+        out[len] = '\0';
+        return 0;
     }
     return -1;
 }
@@ -181,7 +184,7 @@ static void ime_request(const char *cmd, char *resp, size_t cap)
     resp[rn > 0 ? rn : 0] = '\0';
 }
 
-/* ime <拼音> [序号]：查询候选 / 选中第 n 个候选 */
+/* ime <拼音> [序号]：显式查询候选 / 选中第 n 个候选 */
 static void do_ime(char *args[], int n)
 {
     if (n < 2) {
@@ -213,159 +216,28 @@ static void do_ime(char *args[], int n)
         return;
     }
 
-    if (n >= 3) {
-        int idx = parse_index(args[2]);
-        if (idx < 1 || idx > nc) {
-            xapi_Printf("ime: index %d out of range 1..%d\n", idx, nc);
-            return;
-        }
-        xapi_Printf("%s\n", cand[idx - 1]);
-    } else {
+    if (n < 3) {
         for (int i = 0; i < nc; i++)
             xapi_Printf("%d.%s%s", i + 1, cand[i], (i + 1 < nc) ? "  " : "\n");
+        return;
     }
+
+    int idx = parse_index(args[2]);
+    if (idx < 1 || idx > nc) {
+        xapi_Printf("ime: index %d out of range 1..%d\n", idx, nc);
+        return;
+    }
+    xapi_Printf("%s\n", cand[idx - 1]);
 }
 
-/* 查询 daemon 候选，解析 "OK c1 c2 ..." 到 cands[]，返回候选数 */
-static int ime_compose_cands(const char *py, const char *cands[MAX_ARGS])
+/* 读一整行（阻塞）。XAPI_INPUT 在内核里找不到 is_shell 终端时会兜底直读键盘，
+ * 自带回显 + 退格 + 换行处理，因此不依赖逐字节 Getch / 终端标记。 */
+static void read_line(char *buf, size_t cap)
 {
-    char cmd[LINE_CAP];
-    snprintf(cmd, sizeof(cmd), "COMPOSE %s", py);
-    char resp[IME_RESP_CAP] = {0};
-    ime_request(cmd, resp, sizeof(resp));
-    if (strncmp(resp, "OK", 2) != 0) return 0;
-    int nc = 0;
-    char *tok = strtok(resp + 2, " \t");
-    while (tok && nc < MAX_ARGS - 1) { cands[nc++] = tok; tok = strtok(NULL, " \t"); }
-    return nc;
-}
-
-/* 候选格式化成 "1.a 2.b 3.c"（最多 9 个） */
-static int fmt_cands(const char *cands[MAX_ARGS], int nc, char *out, size_t cap)
-{
-    int off = 0;
-    for (int i = 0; i < nc && i < 9; i++) {
-        int w = snprintf(out + off, cap - off, "%d.%s ", i + 1, cands[i]);
-        if (w < 0 || off + w >= (int)cap - 1) break;
-        off += w;
-    }
-    return off;
-}
-
-/* 重绘整行：\r + 清行 + 重写（依赖 ANSI，clear 内置已同样依赖） */
-static void redraw_line(const char *line, int composing, const char *py, const char *candstr)
-{
-    char buf[512];
-    int off = snprintf(buf, sizeof(buf), "lpsh$ %s", line);
-    if (composing) {
-        off += snprintf(buf + off, sizeof(buf) - off, " %s", py);
-        if (candstr[0])
-            off += snprintf(buf + off, sizeof(buf) - off, " [%s]", candstr);
-    }
-    xapi_Printf("\r\x1B[K%s", buf);
-}
-
-/* 逐键 inline 行编辑器 + IME：Esc(128) 切换组合；组合时 a-z 拼音 / 1-9 选候选 / 空格选首 / 退格删拼音 / 回车提交拼音 */
-static void readline_ime(char *line, size_t cap)
-{
-    size_t len = 0;
-    int composing = 0;
-    char py[64] = {0};
-    size_t pylen = 0;
-    char candstr[256] = {0};
-
-    line[0] = '\0';
-    xapi_Printf("lpsh$ ");
-
-    for (;;) {
-        unsigned char ch = (unsigned char)xapi_Getch();
-
-        if (composing) {
-            if (ch >= 'a' && ch <= 'z') {
-                if (pylen < sizeof(py) - 1) py[pylen++] = (char)ch;
-                py[pylen] = '\0';
-                const char *cands[MAX_ARGS];
-                int nc = ime_compose_cands(py, cands);
-                candstr[0] = '\0';
-                fmt_cands(cands, nc, candstr, sizeof(candstr));
-                redraw_line(line, 1, py, candstr);
-                continue;
-            }
-            if (ch >= '1' && ch <= '9') {
-                const char *cands[MAX_ARGS];
-                int nc = ime_compose_cands(py, cands);
-                int idx = ch - '1';
-                if (idx < nc) {
-                    size_t wl = strlen(cands[idx]);
-                    if (len + wl < cap) { memcpy(line + len, cands[idx], wl); len += wl; line[len] = '\0'; }
-                }
-                composing = 0; py[0] = '\0'; pylen = 0; candstr[0] = '\0';
-                redraw_line(line, 0, py, candstr);
-                continue;
-            }
-            if (ch == ' ') {
-                const char *cands[MAX_ARGS];
-                int nc = ime_compose_cands(py, cands);
-                if (nc > 0) {
-                    size_t wl = strlen(cands[0]);
-                    if (len + wl < cap) { memcpy(line + len, cands[0], wl); len += wl; line[len] = '\0'; }
-                }
-                composing = 0; py[0] = '\0'; pylen = 0; candstr[0] = '\0';
-                redraw_line(line, 0, py, candstr);
-                continue;
-            }
-            if (ch == 0x08) {
-                if (pylen > 0) {
-                    pylen--; py[pylen] = '\0';
-                    const char *cands[MAX_ARGS];
-                    int nc = ime_compose_cands(py, cands);
-                    candstr[0] = '\0';
-                    fmt_cands(cands, nc, candstr, sizeof(candstr));
-                    redraw_line(line, 1, py, candstr);
-                } else {
-                    composing = 0; py[0] = '\0'; candstr[0] = '\0';
-                    redraw_line(line, 0, py, candstr);
-                }
-                continue;
-            }
-            if (ch == '\n' || ch == '\r') {
-                size_t pl = strlen(py);
-                if (len + pl < cap) { memcpy(line + len, py, pl); len += pl; line[len] = '\0'; }
-                composing = 0; py[0] = '\0'; pylen = 0; candstr[0] = '\0';
-                redraw_line(line, 0, py, candstr);
-                continue;
-            }
-            if (ch == 128) {
-                composing = 0; py[0] = '\0'; pylen = 0; candstr[0] = '\0';
-                redraw_line(line, 0, py, candstr);
-                continue;
-            }
-            continue;
-        }
-
-        /* 普通模式 */
-        if (ch == '\n' || ch == '\r') {
-            line[len] = '\0';
-            xapi_Printf("\n");
-            return;
-        }
-        if (ch == 0x08) {
-            if (len > 0) { len--; line[len] = '\0'; redraw_line(line, 0, py, candstr); }
-            continue;
-        }
-        if (ch == 128) {
-            composing = 1; py[0] = '\0'; pylen = 0; candstr[0] = '\0';
-            redraw_line(line, 1, py, candstr);
-            continue;
-        }
-        if (ch >= 32 && ch < 127) {
-            if (len < cap - 1) {
-                line[len++] = (char)ch; line[len] = '\0';
-                xapi_Printf("%c", ch);
-            }
-            continue;
-        }
-    }
+    if (buf == NULL || cap == 0)
+        return;
+    buf[0] = '\0';
+    enter_syscall(XAPI_INPUT, (uint64_t)buf, (uint64_t)cap, 0, 0, 0, 0);
 }
 
 int main(int argc, char *argv[], char *envp[])
@@ -393,7 +265,8 @@ int main(int argc, char *argv[], char *envp[])
 
     for (;;) {
         char line[LINE_CAP] = {0};
-        readline_ime(line, sizeof(line));
+        xapi_Printf("lpsh$ ");
+        read_line(line, sizeof(line));
         if (line[0] == '\0')
             continue;
 
