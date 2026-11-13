@@ -14,12 +14,13 @@ TARGET  = OUT / "lpsh.elf"
 
 # SDK 运行时，链接顺序：crt0 入口 → 运行时 → 应用 → liballoc
 # XACT 2026v5 官方运行时（obj-tui/ 由 leopard-sdk 铺装）
-RUNTIME  = ["arch/x86_64/crt0.S.o", "libsys.cpp.o", "constart.cpp.o",
+RUNTIME  = ["arch/x86_64/crt0.S.o", "libsys.cpp.o",
             "xtuiapi.cpp.o", "krlibc.cpp.o", "string.cpp.o", "stdlib.cpp.o",
             "stdio.cpp.o", "unistd.cpp.o", "errno.cpp.o", "posix_ret.cpp.o",
             "ctype.cpp.o", "permissions.cpp.o", "posix_fs.cpp.o",
             "posix_time.cpp.o", "posix_ioctl.cpp.o"]
 LIBALLOC = OBJ / "liballoc-x86_64.a"
+CRT      = SDK / "obj-extra" / "constart.cpp.o"  # Leopard CRT（替换官方 constart）
 
 # ---- xbps 包配置 ----
 # install/data 均为相对 / 的安装路径（无前导斜杠）
@@ -107,7 +108,7 @@ def main():
         app_objs.append(obj)
     L += [""]
 
-    ins = [OBJ / n for n in RUNTIME] + app_objs + [LIBALLOC]
+    ins = [OBJ / n for n in RUNTIME] + [CRT] + app_objs + [LIBALLOC]
     L += [f"build {esc(TARGET)}: link {' '.join(esc(o) for o in ins)}", ""]
 
     emit_package(L, PKG, TARGET)
