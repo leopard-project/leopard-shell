@@ -6,6 +6,7 @@
  * 输入法（leopard-ime）作为独立输入中间层存在，lpsh 只消费整行文本。
  */
 #include "xtuiapi.h"
+#include "libsys.h"
 
 #define LINE_CAP   256
 #define MAX_ARGS   32
@@ -53,6 +54,7 @@ int main(int argc, char *argv[], char *envp[])
         snprintf(g_home, sizeof(g_home), "/users/%s", username);
         strncpy(g_workdir, g_home, sizeof(g_workdir) - 1);
         g_workdir[sizeof(g_workdir) - 1] = '\0';
+        enter_syscall(SYS_CHDIR, (uint64_t)g_home, 0, 0, 0, 0, 0);
 
         /* path 变量（读不到用默认） */
         if (config_get(username, "path", g_path, sizeof(g_path)) != 0) {
@@ -226,6 +228,10 @@ static void do_cd(char *arg)
         }
         char norm[PATH_CAP];
         normalize_path(norm, sizeof(norm), joined);
+        if ((int64_t)enter_syscall(SYS_CHDIR, (uint64_t)norm, 0, 0, 0, 0, 0) != 0) {
+                xapi_Printf("cd: %s: no such directory\n", norm);
+                return;
+        }
         strncpy(g_workdir, norm, sizeof(g_workdir) - 1);
         g_workdir[sizeof(g_workdir) - 1] = '\0';
 }
