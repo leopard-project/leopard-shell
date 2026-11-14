@@ -174,6 +174,12 @@ static void normalize_path(char *dst, size_t dst_cap, const char *src)
         }
 }
 
+static int file_exists(const char *path)
+{
+        char byte = 0;
+        return path != NULL && (int64_t)xapi_ReadFile((WSTR)path, &byte, 1, 0) > 0;
+}
+
 static int64_t run_command(char *args[])
 {
         /* 启动进程，成功返回 pid，失败返回负数 */
@@ -181,9 +187,11 @@ static int64_t run_command(char *args[])
         strncpy(cmd, args[0], sizeof(cmd) - 1);
         cmd[sizeof(cmd) - 1] = '\0';
 
-        /* 绝对路径：直接跑 */
-        if (cmd[0] == '/')
+        /* 绝对路径：先探测，避免内核为一次预期落空打印 "Cannot Open File" */
+        if (cmd[0] == '/') {
+                if (!file_exists(cmd)) return -1;
                 return spawn(cmd, args);
+        }
 
         /* 含 '/'：相对 workdir 解析 */
         if (strchr(cmd, '/') != NULL) {
@@ -191,6 +199,7 @@ static int64_t run_command(char *args[])
                 snprintf(joined, sizeof(joined), "%s/%s", g_workdir, cmd);
                 char norm[PATH_CAP];
                 normalize_path(norm, sizeof(norm), joined);
+                if (!file_exists(norm)) return -1;
                 return spawn(norm, args);
         }
 
@@ -202,12 +211,11 @@ static int64_t run_command(char *args[])
         for (char *entry = strtok(path_copy, ":"); entry != NULL; entry = strtok(NULL, ":")) {
                 char cand[PATH_CAP];
                 snprintf(cand, sizeof(cand), "%s/%s", entry, cmd);
-                int64_t pid = spawn(cand, args);
-                if (pid >= 0) return pid;
-
-                snprintf(cand, sizeof(cand), "%s/%s.elf", entry, cmd);
-                pid = spawn(cand, args);
-                if (pid >= 0) return pid;
+                if (!file_exists(cand)) {
+                        snprintf(cand, sizeof(cand), "%s/%s.elf", entry, cmd);
+                        if (!file_exists(cand)) continue;
+                }
+                return spawn(cand, args);
         }
         return -1;
 }
