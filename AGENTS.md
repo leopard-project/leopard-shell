@@ -16,4 +16,4 @@ Leopard 的全新用户态 shell，二进制名 `lpsh`。
     python3 gen_ninja.py && ninja build   # → out/lpsh.elf
     ninja pack
 
-- 静态 ELF，依赖 `../XJ380-SDK`（`src/include` + `obj-tui`）。
+- 静态 ELF，依赖 `../XACT-CRT`（`include/` + `lib/x86_64/`）。
