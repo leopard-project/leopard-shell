@@ -20,7 +20,7 @@ CRT_LIBS = [LIB / "libxact.a", LIB / "liballoc.a"]
 # install/data 均为相对 / 的安装路径（无前导斜杠）
 PKG = {
     "pkgname": "leopard-shell",
-    "pkgver":  "1.0_2",
+    "pkgver":  "1.0_3",
     "arch":    "x86_64",
     "desc":    "Leopard shell (lpsh)",
     "deps":    "",

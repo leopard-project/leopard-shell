@@ -2,11 +2,20 @@
  * lpsh — Leopard Shell
  * 用户态 shell：workdir 概念 + 读取 path 变量解析命令（替代硬编码 /apps）。
  *
- * 输入采用整行读取（XAPI_INPUT）。不再做逐字节行编辑器 / 内联 IME：
- * 输入法（leopard-ime）作为独立输入中间层存在，lpsh 只消费整行文本。
+ * 输入采用整行读取（fd 0）；PTY slave 的 canonical 行规程负责回显/退格。
+ * 子进程通过 fork/exec 继承 0/1/2，避免内核新任务回退到 /dev/stdio。
+ * 输入法（leopard-ime）作为 conhost 之后的独立层存在，lpsh 只消费整行文本。
  */
 #include "xtuiapi.h"
 #include "libsys.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#endif
 
 #define LINE_CAP   256
 #define MAX_ARGS   32
@@ -19,23 +28,47 @@
 static char g_home[PATH_CAP];
 static char g_workdir[PATH_CAP];
 static char g_path[CONFIG_CAP];
+static char **g_envp;
 
 static int config_get(const char *, const char *, char *, size_t);
 static void normalize_path(char *, size_t, const char *);
 static inline int64_t spawn(char *path, char *args[])
 {
-        return (int64_t)xapi_RunArgs((WSTR)path, (WSTR *)args);
+        /* fork/exec keeps fd 0/1/2 on the PTY slave.  xapi_RunArgs creates a
+         * fresh task whose stdio falls back to /dev/stdio, which bypasses the
+         * PTY and breaks fd-based commands. */
+        pid_t pid = fork();
+
+        if (pid < 0)
+                return -1;
+        if (pid == 0) {
+                execve(path, args, g_envp);
+                _exit(127);
+        }
+        return (int64_t)pid;
 }
 static int64_t run_command(char *args[]);
 static void do_cd(char *arg);
-static inline void read_line(char *buf, size_t cap)
+static inline int read_line(char *buf, size_t cap)
 {
-        /* 读一整行（阻塞）。XAPI_INPUT 在内核里找不到 is_shell 终端时会兜底直读键盘，
-         * 自带回显 + 退格 + 换行处理，因此不依赖逐字节 Getch / 终端标记。 */
-        if (buf == NULL || cap == 0)
-                return;
+        /* fd stdio: the shell runs on the PTY slave (fd 0), and the slave's
+         * canonical line discipline provides echo/backspace.  XAPI_INPUT is
+         * no longer the shell's primary input path. */
+        ssize_t got;
+
+        if (buf == NULL || cap < 2)
+                return 0;
         buf[0] = '\0';
-        enter_syscall(XAPI_INPUT, (uint64_t)buf, (uint64_t)cap, 0, 0, 0, 0);
+
+        got = read(STDIN_FILENO, buf, cap - 1);
+        if (got == 0)
+                return -1; /* EOF */
+        if (got < 0)
+                return 0;
+        while (got > 0 && (buf[got - 1] == '\n' || buf[got - 1] == '\r'))
+                buf[--got] = '\0';
+        buf[got] = '\0';
+        return (int)got;
 }
 
 int main(int argc, char *argv[], char *envp[])
@@ -43,6 +76,8 @@ int main(int argc, char *argv[], char *envp[])
         (void)argc;
         (void)argv;
         (void)envp;
+
+        g_envp = envp;
 
         /* 当前登录用户 */
         UserInfo ui;
@@ -64,8 +99,11 @@ int main(int argc, char *argv[], char *envp[])
 
         for (;;) {
                 char line[LINE_CAP] = {0};
-                xapi_Printf("lpsh$ ");
-                read_line(line, sizeof(line));
+                printf("lpsh$ ");
+                if (read_line(line, sizeof(line)) < 0) {
+                        printf("\n");
+                        return 0;
+                }
                 if (line[0] == '\0')
                         continue;
 
@@ -81,11 +119,11 @@ int main(int argc, char *argv[], char *envp[])
                 if (strcmp(args[0], "exit") == 0)
                         return 0;
                 if (strcmp(args[0], "clear") == 0) {
-                        xapi_Printf("\033[2J\033[H");
+                        printf("\033[2J\033[H");
                         continue;
                 }
                 if (strcmp(args[0], "pwd") == 0) {
-                        xapi_Printf("%s\n", g_workdir);
+                        printf("%s\n", g_workdir);
                         continue;
                 }
                 if (strcmp(args[0], "cd") == 0) {
@@ -95,7 +133,7 @@ int main(int argc, char *argv[], char *envp[])
 
                 int64_t pid = run_command(args);
                 if (pid < 0) {
-                        xapi_Printf("command not found: %s\n", args[0]);
+                        printf("command not found: %s\n", args[0]);
                 } else {
                         int status = 0;
                         enter_syscall(SYS_WAIT4, (uint64_t)pid, (uint64_t)&status, 0, 0, 0, 0);
@@ -237,7 +275,7 @@ static void do_cd(char *arg)
         char norm[PATH_CAP];
         normalize_path(norm, sizeof(norm), joined);
         if ((int64_t)enter_syscall(SYS_CHDIR, (uint64_t)norm, 0, 0, 0, 0, 0) != 0) {
-                xapi_Printf("cd: %s: no such directory\n", norm);
+                printf("cd: %s: no such directory\n", norm);
                 return;
         }
         strncpy(g_workdir, norm, sizeof(g_workdir) - 1);
