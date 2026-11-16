@@ -116,16 +116,11 @@ int main(int argc, char *argv[], char *envp[])
                 if (n == 0)
                         continue;
 
+                /* Shell builtins are limited to state that cannot cross a
+                 * process boundary: exit and cwd.  pwd/clear are external
+                 * commands resolved through path= like any other tool. */
                 if (strcmp(args[0], "exit") == 0)
                         return 0;
-                if (strcmp(args[0], "clear") == 0) {
-                        printf("\033[2J\033[H");
-                        continue;
-                }
-                if (strcmp(args[0], "pwd") == 0) {
-                        printf("%s\n", g_workdir);
-                        continue;
-                }
                 if (strcmp(args[0], "cd") == 0) {
                         do_cd(args[1]);
                         continue;
@@ -261,6 +256,10 @@ static int64_t run_command(char *args[])
 static void do_cd(char *arg)
 {
         if (arg == NULL || arg[0] == '\0') {
+                if ((int64_t)enter_syscall(SYS_CHDIR, (uint64_t)g_home, 0, 0, 0, 0, 0) != 0) {
+                        printf("cd: %s: no such directory\n", g_home);
+                        return;
+                }
                 strncpy(g_workdir, g_home, sizeof(g_workdir) - 1);
                 g_workdir[sizeof(g_workdir) - 1] = '\0';
                 return;
