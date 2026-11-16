@@ -1,10 +1,10 @@
 /*
  * lpsh — Leopard Shell
- * 用户态 shell：workdir 概念 + 读取 path 变量解析命令（替代硬编码 /apps）。
+ * userspace shell: workdir concept + reads the path variable to resolve commands (replaces hardcoded /apps).
  *
- * 输入采用整行读取（fd 0）；PTY slave 的 canonical 行规程负责回显/退格。
- * 子进程通过 fork/exec 继承 0/1/2，避免内核新任务回退到 /dev/stdio。
- * 输入法（leopard-ime）作为 conhost 之后的独立层存在，lpsh 只消费整行文本。
+ * Input is read as whole lines (fd 0); the PTY slave's canonical line discipline handles echo/backspace.
+ * Child processes inherit 0/1/2 via fork/exec, avoiding new kernel tasks falling back to /dev/stdio.
+ * The input method (leopard-ime) is a separate layer after conhost; lpsh only consumes whole-line text.
  */
 #include "xtuiapi.h"
 #include "libsys.h"
@@ -79,19 +79,19 @@ int main(int argc, char *argv[], char *envp[])
 
         g_envp = envp;
 
-        /* 当前登录用户 */
+        /* current logged-in user */
         UserInfo ui;
         memset(&ui, 0, sizeof(ui));
         xapi_GetCurrentUser(&ui);
         const char *username = ui.name[0] != '\0' ? ui.name : "user";
 
-        /* home = /users/<用户名> */
+        /* home = /users/<username> */
         snprintf(g_home, sizeof(g_home), "/users/%s", username);
         strncpy(g_workdir, g_home, sizeof(g_workdir) - 1);
         g_workdir[sizeof(g_workdir) - 1] = '\0';
         enter_syscall(SYS_CHDIR, (uint64_t)g_home, 0, 0, 0, 0, 0);
 
-        /* path 变量（读不到用默认） */
+        /* path variable (use the default if it cannot be read) */
         if (config_get(username, "path", g_path, sizeof(g_path)) != 0) {
                 strncpy(g_path, DEFAULT_PATH, sizeof(g_path) - 1);
                 g_path[sizeof(g_path) - 1] = '\0';
@@ -143,7 +143,7 @@ int main(int argc, char *argv[], char *envp[])
 
 static int config_get(const char *username, const char *key, char *out, size_t out_cap)
 {
-        /* 读取 /users/<用户名>/config 中某个 key= 的值，成功返回 0，失败返回 -1 */
+        /* Read a key= value from /users/<username>/config; return 0 on success, -1 on failure */
         char config_path[PATH_CAP];
         snprintf(config_path, sizeof(config_path), "/users/%s/config", username);
 
@@ -184,7 +184,7 @@ static int config_get(const char *username, const char *key, char *out, size_t o
 
 static void normalize_path(char *dst, size_t dst_cap, const char *src)
 {
-        /* 就地规范化绝对路径：折叠 /./ 与 /../ */
+        /* Normalize an absolute path in place: fold /./ and /../ */
         char tmp[PATH_CAP];
         strncpy(tmp, src, sizeof(tmp) - 1);
         tmp[sizeof(tmp) - 1] = '\0';
@@ -220,18 +220,18 @@ static int file_exists(const char *path)
 
 static int64_t run_command(char *args[])
 {
-        /* 启动进程，成功返回 pid，失败返回负数 */
+        /* Start a process; return pid on success, negative on failure */
         char cmd[PATH_CAP];
         strncpy(cmd, args[0], sizeof(cmd) - 1);
         cmd[sizeof(cmd) - 1] = '\0';
 
-        /* 绝对路径：先探测，避免内核为一次预期落空打印 "Cannot Open File" */
+        /* Absolute path: probe first, to avoid the kernel printing "Cannot Open File" for an expected miss */
         if (cmd[0] == '/') {
                 if (!file_exists(cmd)) return -1;
                 return spawn(cmd, args);
         }
 
-        /* 含 '/'：相对 workdir 解析 */
+        /* Contains '/': resolve relative to workdir */
         if (strchr(cmd, '/') != NULL) {
                 char joined[PATH_CAP];
                 snprintf(joined, sizeof(joined), "%s/%s", g_workdir, cmd);
@@ -241,7 +241,7 @@ static int64_t run_command(char *args[])
                 return spawn(norm, args);
         }
 
-        /* 裸命令名：按 path 变量逐项查找 */
+        /* Bare command name: search item by item through the path variable */
         char path_copy[CONFIG_CAP];
         strncpy(path_copy, g_path, sizeof(path_copy) - 1);
         path_copy[sizeof(path_copy) - 1] = '\0';
