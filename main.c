@@ -116,11 +116,15 @@ int main(int argc, char *argv[], char *envp[])
                 if (n == 0)
                         continue;
 
-                /* Shell builtins are limited to state that cannot cross a
-                 * process boundary: exit and cwd.  pwd/clear are external
-                 * commands resolved through path= like any other tool. */
+                /* Bash-like stateful builtins: cd/pwd/exit.  clear remains
+                 * external (Bash does not provide it either), and all other
+                 * commands are resolved through path=. */
                 if (strcmp(args[0], "exit") == 0)
                         return 0;
+                if (strcmp(args[0], "pwd") == 0) {
+                        printf("%s\n", g_workdir);
+                        continue;
+                }
                 if (strcmp(args[0], "cd") == 0) {
                         do_cd(args[1]);
                         continue;
